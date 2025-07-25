@@ -1,0 +1,69 @@
+pool:
+  name: Default
+  demands:
+    - agent.name -equals bap-vm-cicd
+
+variables:
+- group: ACRCredentials
+- name: IMAGE_NAME
+  value: 'dev-borderlessapp'
+- name: CONTAINER_APP_NAME
+  value: 'borderless-access-pilot'
+- name: RESOURCE_GROUP
+  value: 'Borderless-access-pilot'
+
+stages:
+- stage: Rollback
+  displayName: 'Rollback to Previous Container App Image'
+  jobs:
+  - job: DeployNMinus1
+    displayName: 'Deploy N-1 Image to Azure Container App'
+    steps:
+    - checkout: none
+
+    - task: AzureCLI@2
+      displayName: 'Deploy N-1 Image'
+      inputs:
+        azureSubscription: 'Azure-Zuci-Connection'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          echo "🔍 Fetching tags for rollback..."
+          IMAGE_NAME=$(IMAGE_NAME)
+          ACR_NAME=$(ACR_LOGIN_SERVER)
+
+          tags=$(az acr repository show-tags \
+            --name $ACR_NAME \
+            --repository $IMAGE_NAME \
+            --orderby time_desc \
+            --output tsv)
+
+          echo "📦 All tags:"
+          echo "$tags"
+
+          rollback_tag=""
+          count=0
+
+          for tag in $tags; do
+            if [[ "$tag" != "latest" ]]; then
+              count=$((count+1))
+              if [ $count -eq 2 ]; then
+                rollback_tag=$tag
+                break
+              fi
+            fi
+          done
+
+          if [ -z "$rollback_tag" ]; then
+            echo "❌ Could not find N-1 image tag for rollback."
+            exit 1
+          fi
+
+          echo "🔁 Rolling back to tag: $rollback_tag"
+
+          az containerapp update \
+            --name $(CONTAINER_APP_NAME) \
+            --resource-group $(RESOURCE_GROUP) \
+            --image $ACR_NAME/$IMAGE_NAME:$rollback_tag
+
+          echo "✅ Rollback to $rollback_tag complete."
