@@ -1,0 +1,250 @@
+# azure-pipelines.yml
+trigger:
+  branches:
+    include:
+      - uat
+      
+pool:
+  name: Default
+  demands:
+    - agent.name -equals bap-vm-cicd
+
+variables:
+- group: UAT-GitHubAccess
+- group: UAT-ACRCredentials
+- group: UAT-SonarQube
+- group: UAT-StorageAccount
+- group: UAT-OWASP
+- name: BRANCH
+  value: $(Build.SourceBranchName)
+- name: IMAGE_NAME
+  value: 'uat-borderlessapp'
+- name: ZAP_REPORT_NAME
+  value: 'zap-report-$(Build.BuildId).html'
+- name: KEEP_COUNT
+  value: '20'
+
+
+stages:
+# ------------------------------------
+# Stage 0: Approval Gate
+# ------------------------------------
+- stage: ApprovalGate
+  displayName: 'Approval Gate for Master and Release/Develop'
+  condition: and(succeeded(), or(eq(variables['Build.SourceBranch'], 'refs/heads/master'), eq(variables['Build.SourceBranch'], 'refs/heads/uat')))
+  jobs:
+  - deployment: WaitForApproval
+    displayName: 'Manual Approval Required'
+    environment: 'uat-approval-env'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+          - script: echo "✅ Approval granted. Proceeding..."
+
+# ------------------------------------
+# Stage 1: Clone Repository
+# ------------------------------------
+- stage: CloneRepo
+  displayName: 'Clone GitHub Repository'
+  dependsOn: ApprovalGate
+  jobs:
+  - job: Clone
+    steps:
+    - script: |
+        echo "📥 Cloning branch: $(BRANCH)"
+        git clone https://$(UAT_GITHUB_USERNAME):$(UAT_GITHUB_TOKEN)@github.com/$(UAT_GITHUB_REPO).git --branch $(BRANCH)
+        cd Borderless-workshop-cookbook-and-pilot
+        echo "📁 Repo structure:"
+        pwd && ls -R
+      displayName: 'Clone GitHub Repo'
+# ------------------------------------
+# Stage 2: SonarQube Analysis
+# ------------------------------------
+- stage: SonarQubeScan
+  displayName: '🔍 SonarQube Docker Scan'
+  dependsOn: CloneRepo
+  condition: succeeded()
+  jobs:
+    - job: DockerSonarScan
+      displayName: '🐳 Docker-based SonarQube Scan'
+      steps:
+        - checkout: none
+        - script: |
+            echo "📦 Running SonarQube Docker Scan"
+
+            sudo docker run --rm \
+              -e SONAR_HOST_URL=$(UAT_SONARQUBE_URL) \
+              -e SONAR_LOGIN=$(UAT_SONAR_TOKEN) \
+              -v $(Build.SourcesDirectory)/backend/src:/usr/src \
+              -v $(Build.SourcesDirectory)/sonar-scanner.properties:/opt/sonar-scanner/conf/sonar-scanner.properties \
+              sonarsource/sonar-scanner-cli:11.0.1.1589_6.1.0
+          displayName: '🔍 Run SonarQube Scan via Docker'
+# ------------------------------------
+# Stage 3: SonarQube Report
+# ------------------------------------
+- stage: SonarQubeReport 
+  displayName: 'SonarQube Report'
+  dependsOn:
+    - SonarQubeScan
+  jobs:
+  - job: SonarReport
+    steps:
+    - checkout: none
+    - script: |
+        pip install requests
+        pwd
+        ls -R
+        # cd Borderless-workshop-cookbook-and-pilot
+        python3 generate_report_3.py
+      env:
+        SONAR_TOKEN: $(UAT_SONAR_TOKEN)
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure-Zuci-Connection'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          az storage blob upload \
+            --account-name $(UAT_STORAGE_ACCOUNT_NAME) \
+            --account-key $(UAT_STORAGE_ACCOUNT_KEY) \
+            --container-name $(UAT_SONAR_CONTAINER_NAME) \
+            --name sonar-report-$(Build.BuildId).html \
+            --file sonar-report.html \
+            --overwrite
+# ------------------------------------
+# Stage 4: Docker Build & Push
+# ------------------------------------
+- stage: DockerBuildPush
+  displayName: 'Docker Build and Push'
+  dependsOn:
+    - SonarQubeReport
+    # - CloneRepo
+  jobs:
+  - job: Docker
+    steps:
+    - checkout: none
+    - script: echo $(UAT_ACR_PASSWORD) | docker login $(UAT_ACR_LOGIN_SERVER) -u $(UAT_ACR_USERNAME) --password-stdin
+    - script: |
+        cd Borderless-workshop-cookbook-and-pilot
+        docker build -t $(UAT_ACR_LOGIN_SERVER)/$(IMAGE_NAME):$(Build.BuildId) .
+        docker tag $(UAT_ACR_LOGIN_SERVER)/$(IMAGE_NAME):$(Build.BuildId) $(UAT_ACR_LOGIN_SERVER)/$(IMAGE_NAME):latest
+        docker push $(UAT_ACR_LOGIN_SERVER)/$(IMAGE_NAME):$(Build.BuildId)
+        docker push $(UAT_ACR_LOGIN_SERVER)/$(IMAGE_NAME):latest
+
+# ------------------------------------
+# Stage 5: Image Scan (Grype)
+# ------------------------------------
+- stage: ImageScan
+  displayName: 'Image Scan with Grype'
+  dependsOn:
+    - DockerBuildPush
+  jobs:
+  - job: GrypeScan
+    steps:
+    - checkout: none
+    - script: |
+        docker run --rm \
+          -v /var/run/docker.sock:/var/run/docker.sock \
+          anchore/grype:latest \
+          $(UAT_ACR_LOGIN_SERVER)/$(IMAGE_NAME):$(Build.BuildId) > image-scan.txt || true
+    - script: |
+        python3 Borderless-workshop-cookbook-and-pilot/convert_to_html.py
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure-Zuci-Connection'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          az storage blob upload \
+            --account-name $(UAT_STORAGE_ACCOUNT_NAME) \
+            --account-key $(UAT_STORAGE_ACCOUNT_KEY) \
+            --container-name $(UAT_GRYPE_CONTAINER_NAME) \
+            --file image-scan.html \
+            --name grype-report-$(Build.BuildId).html \
+            --overwrite
+
+# ------------------------------------
+# Stage 6: Deploy to Azure Container App
+# ------------------------------------
+- stage: Deploy
+  displayName: 'Deploy to Azure Container App'
+  dependsOn:
+    - ImageScan
+  jobs:
+  - job: DeployApp
+    steps:
+    - checkout: none
+    - task: AzureContainerApps@1
+      inputs:
+        azureSubscription: 'Azure-Zuci-Connection'
+        containerAppName: 'borderless-access-pilot-uat'
+        resourceGroup: 'Borderless-access-pilot'
+        imageToDeploy: '$(UAT_ACR_LOGIN_SERVER)/$(IMAGE_NAME):$(Build.BuildId)'
+        containerAppEnvironment: 'event-env'
+        acrUsername: '$(UAT_ACR_USERNAME)'
+        acrPassword: '$(UAT_ACR_PASSWORD)'
+        ingress: 'external'
+        targetPort: '8000'
+
+# ------------------------------------
+# Stage 7: OWASP ZAP Scan
+# ------------------------------------
+- stage: ZAPScan
+  displayName: 'OWASP ZAP Scan'
+  dependsOn:
+    - Deploy
+  jobs:
+  - job: ZAP
+    steps:
+    - checkout: none
+    - script: sleep 60
+    - script: curl -I https://borderless-access-pilot.wittyforest-5fea1062.eastus.azurecontainerapps.io/ || exit 1
+    - script: |
+        sudo docker run --rm --user root \
+          -v $(Build.SourcesDirectory):/zap/wrk \
+          ghcr.io/zaproxy/zaproxy:stable zap-baseline.py \
+          -t $(UAT_ZAP_TARGET_URL) \
+          -r $(ZAP_REPORT_NAME) \
+          -m 3 \
+          -z "-config api.disablekey=true" || true
+    - task: AzureCLI@2
+      inputs:
+        azureSubscription: 'Azure-Zuci-Connection'
+        scriptType: bash
+        scriptLocation: inlineScript
+        inlineScript: |
+          az storage blob upload \
+            --account-name $(UAT_STORAGE_ACCOUNT_NAME) \
+            --account-key $(UAT_STORAGE_ACCOUNT_KEY) \
+            --container-name $(UAT_OWASP_CONTAINER_NAME) \
+            --file "$(Build.SourcesDirectory)/$(ZAP_REPORT_NAME)" \
+            --name $(ZAP_REPORT_NAME) \
+            --overwrite
+
+# ------------------------------------
+# Stage 8: ACR Cleanup
+# ------------------------------------
+- stage: CleanupACR
+  displayName: 'Cleanup ACR Old Tags'
+  dependsOn:
+    - ZAPScan
+  jobs:
+  - job: DeleteOldImageTags
+    displayName: 'Retain latest + last $(KEEP_COUNT) image tags in ACR'
+    steps:
+    - task: AzureCLI@2
+      displayName: 'Delete old ACR tags'
+      inputs:
+        azureSubscription: 'Azure-Zuci-Connection'
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          echo "🧹 Cleaning up ACR images for $(IMAGE_NAME)"
+          all_tags=$(az acr repository show-tags --name $(UAT_ACR_LOGIN_SERVER) --repository $(IMAGE_NAME) --orderby time_desc --output tsv)
+          filtered_tags=$(echo "$all_tags" | grep -v '^latest$')
+          tags_to_delete=$(echo "$filtered_tags" | tail -n +$((KEEP_COUNT + 1)))
+          for tag in $tags_to_delete; do
+            echo "🗑 Deleting: $tag"
+            az acr repository delete --name $(UAT_ACR_LOGIN_SERVER) --image $(IMAGE_NAME):$tag --yes
+          done
