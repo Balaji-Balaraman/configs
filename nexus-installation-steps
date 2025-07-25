@@ -1,0 +1,75 @@
+  150  wget https://download.sonatype.com/nexus/3/nexus-3.82.0-08-linux-x86_64.tar.gz
+  154  cd /opt/
+  156  cd /home/ba-azureuser-dev/
+  158  sudo tar -xvzf /home/ba-azureuser-dev/nexus-3.82.0-08-linux-x86_64.tar.gz
+  160  sudo useradd -r -m -d /opt/nexus -s /bin/bash nexus
+  162  mv nexus-3.82.0-08 /opt/nexus
+  163  sudo mkdir /opt/sonatype-work
+  164  sudo chown -R nexus:nexus /opt/nexus /opt/sonatype-work
+  179  cd /opt/nexus/nexus-3.82.0-08/bin/
+  182  vi nexus.rc
+  183  sudo vi /etc/systemd/system/nexus.service (run_as_user="nexus")
+  184  sudo systemctl daemon-reload
+  185  sudo systemctl enable nexus
+  186  sudo systemctl start nexus
+  187  systemctl status nexus.service
+  188  journalctl -u nexus.service
+  189  journalctl -u nexus.service --since "5 minutes ago"
+  190  sudo vi /etc/systemd/system/nexus.service
+[Unit]
+Description=nexus service
+After=network.target
+
+[Service]
+Type=forking
+LimitNOFILE=65536
+#ExecStart=/opt/nexus/bin/nexus start
+#ExecStop=/opt/nexus/bin/nexus stop
+ExecStart=/opt/nexus/nexus-3.82.0-08/bin/nexus start
+ExecStop=/opt/nexus/nexus-3.82.0-08/bin/nexus stop
+User=nexus
+Restart=on-abort
+
+[Install]
+WantedBy=multi-user.target
+
+  191  sudo systemctl enable nexus
+  192  sudo systemctl start nexus
+  193  systemctl status nexus.service
+*********************************************************************************************************************************
+  sudo mkdir -p /etc/systemd/system/docker.service.d
+  451  sudo vi /etc/systemd/system/docker.service.d/override.conf
+[Service]
+ExecStart=
+ExecStart=/usr/bin/dockerd --config-file=/etc/docker/daemon.json
+
+  452  sudo systemctl daemon-reexec
+  453  sudo systemctl daemon-reload
+  454  sudo systemctl restart docker
+  455  docker info | grep -i insecure
+  456  cat /etc/systemd/system/docker.service.d/override.conf
+  457  ps aux | grep dockerd
+  458  docker info | grep -A 10 "Insecure Registries"
+  459  docker info | grep -i insecure
+  460  ocker login 20.109.58.71:8085
+  461  docker login 20.109.58.71:8085
+  462  which docker && docker info | grep -A 10 "Insecure Registries"
+  463  update-alternatives --config docker
+  464  /usr/bin/docker --config-file=/etc/docker/daemon.json login $DOCKER_REGISTRY -u $DOCKER_USER --password-stdin <<< "$DOCKER_PASS"
+  465  sudo usermod -aG docker jenkins
+  466  sudo systemctl restart jenkins
+  467  sudo su - jenkins
+  468  sudo su - jenki
+  469  docker ps
+  470  who
+  471  whoami
+  472  cd /home/m
+  473  cd /home/
+  474  ll
+  475  docker ps
+  476  docker images
+  477  docker rmi 2cd1d97f893f
+  478  docker rmi 2cd1d97f893f -f
+  479  docker images
+  480  docker pull 20.109.58.71:8085/nginx:latest
+  481  docker images
