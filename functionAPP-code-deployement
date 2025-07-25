@@ -1,0 +1,66 @@
+trigger:
+  branches:
+    include:
+      - email-event-publish
+      - release/develop
+
+pool:
+  name: Default
+  demands:
+    - agent.name -equals bap-vm-cicd
+
+variables:
+- group: GitHubAccess
+- group: ACRCredentials
+- group: SonarQube
+- group: StorageAccount
+- group: OWASP
+
+- name: BRANCH
+  value: $(Build.SourceBranchName)
+- name: IMAGE_NAME
+  value: 'borderlessapp'
+- name: ZAP_REPORT_NAME
+  value: 'zap-report-$(Build.BuildId).html'
+- name: KEEP_COUNT
+  value: '20'
+
+stages:
+- stage: BuildAndDeploy
+  displayName: 'Publish Azure Function App'
+  jobs:
+  - job: PublishFunction
+    displayName: 'Deploy via func azure functionapp publish'
+    steps:
+
+    # Checkout the repository
+    - checkout: self
+
+    # Optional: Show the repo content for debugging
+    - script: |
+        echo "📦 Branch: $(BRANCH)"
+        echo "📁 Build.SourcesDirectory: $(Build.SourcesDirectory)"
+        ls -R $(Build.SourcesDirectory)
+      displayName: 'Display Repository Structure'
+
+    # Publish to Azure Function App using Core Tools
+    - task: AzureCLI@2
+      displayName: 'Publish Function App Using Core Tools'
+      inputs:
+        azureSubscription: 'Azure-Zuci-Connection'   # Replace with your Azure service connection name
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          echo "📤 Moving to function app directory..."
+          cd $(Build.SourcesDirectory)/cloud/azure/function_app
+          
+          echo "👣 Current directory:"
+          pwd
+          
+          echo "📁 Directory listing:"
+          ls -la
+
+          echo "🚀 Publishing Azure Function..."
+          func azure functionapp publish bap-functiontest --nozip
+
+          echo "✅ Function app published successfully!"
